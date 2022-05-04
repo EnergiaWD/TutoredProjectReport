@@ -1,0 +1,1454 @@
+\documentclass[oneside,12pt]{report}
+\usepackage[utf8]{inputenc}
+\usepackage{graphicx}
+\usepackage{multicol}
+\usepackage{hyperref}
+\usepackage{fancyheadings}
+\usepackage[francais]{babel}
+\usepackage[a4paper]{geometry}
+\usepackage[table]{xcolor}
+\usepackage{float}
+\usepackage{anyfontsize}
+\usepackage{t1enc}
+\usepackage{listings}
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=2
+}
+
+\lstset{style=mystyle}
+
+\geometry{%
+  left=20mm,width=165mm,
+  top=20mm,height=247mm,
+  footskip=15mm}
+
+\begin{document}
+
+\thispagestyle{empty}
+\begin{center}
+  \includegraphics[width=12cm]{images/Univ.png}\\[8cm]
+  {\huge{\textbf{Métrologie centralisée d'un cluster Docker}}}\\[1cm]
+  {\Large{Par : Maxence Luongo, Sébastien Saintot, Evan Daussin, Tom Thioulouse}}\\[1cm]
+\end{center}
+
+\pagestyle{fancy}
+\lhead{Métrologie centralisée d'un cluster Docker}
+
+\tableofcontents
+\chapter{Remerciements}
+
+Avant d'introduire ce rapport de projet, nous souhaitons d'abord remercier l'intégralité de la licence professionnelle ASRALL à l'IUT Nancy-Charlemagne, enseignants comme étudiants, pour ces 7 mois d'enseignements autour du Logiciel Libre auxquels nous avons eu la chance d'assister tous ensemble en physique. \newline
+
+Nous remercions plus spécifiquement les étudiants pour avoir distillé bienveillance et partage au sein de la salle de classe. \newline
+
+Ainsi que le corps enseignant pour leur volonté de transmettre leurs connaissances et leurs expériences. \newline
+
+Nous remercions également Monsieur Philippe Dosch, responsable de cette licence professionnelle. D'une part, pour avoir rendu celle-ci possible. D'autre part, pour nous avoir guidé tout au long de ce projet et avoir répondu à nos questionnements, souvent par des principes qui nous permettaient de trouver les réponses à des questions complexes par nous-mêmes. Mais aussi pour ses conseils en matière de rédaction et plus spécifiquement pour ses astuces de passionné sous LaTeX, solution que nous avons choisie pour rédiger ce rapport. \newline
+
+\chapter{Introduction}
+
+\section{Contexte}
+Pour tout administrateur système, le critère de succès le plus important se résume simplement à “une infrastructure qui fonctionne”. Avec l'émergence de la haute disponibilité, plusieurs solutions permettant d'aboutir à une infrastructure “bien pensée”, ont vu le jour, notamment le failover ou la redondance. Or, comme démontré par la loi de Murphy, ce qui peut mal se passer finira par arriver. \newline
+
+C'est en suivant cette idéologie, qu'on finit par s'intéresser au concept de métrologie. Celui-ci permet de récolter des informations sur l'état de notre infrastructure et détecter voire prédire les problèmes avant que les utilisateurs ne nous les signalent. La métrologie est à ne pas confondre avec la supervision, nous cherchons bien à récupérer la charge et la tracer dans le temps et non pas à récupérer l'état d'un service à un instant T pour vérifier son bon fonctionnement. \newline
+
+Dans notre cas, nous utilisons alors plusieurs composantes inhérentes à la métrologie dont les sondes pour obtenir les données, les bases de données pour les stocker, les dashboards pour afficher les résultats de manière centralisée, et éventuellement un système de notifications pour notifier d'incidents imminents.
+
+\section{Objectifs}
+
+Le projet consiste à conteneuriser des applications web au sein d'un cluster Docker et d'être capable de récupérer les charges du cluster et des applications web sur diverses échelles de temps. Il faudra ensuite les tracer dans le temps à partir des métriques récoltés, de manière centralisée pour avoir une vue d'ensemble sur les performances de l'infrastructure complète. \newline
+
+
+Dans le cadre de ces objectifs nous utiliserons d'abord Docker Swarm pour mettre en place notre cluster et déployer nos applications web conteneurisées. L'avantage de cette solution est que l'équilibrage de charge se fait automatiquement et nos services sont facilement extensibles.\newline
+
+
+Pour aboutir à la métrologie souhaitée de notre infrastructure, nous utiliserons plusieurs sondes : cAdvisor et Node Exporter qui permettent respectivement de récupérer les métriques des conteneurs et des machines hôtes, ce sont les technologies qui constituent notre métrologie fine.\newline
+
+
+Quant à la métrologie moyenne et la rétention longue nous nous sommes tournés vers Prometheus et InfluxDB.\newline
+
+Enfin, nous avons choisi Grafana pour centraliser et visualiser les métriques sous forme de dashboards.\newline
+
+
+Pour simuler des montées en charge sur les applications web, nous utiliserons Gatling avec un programme, écrit en Java, dont le rôle sera de générer du trafic.
+
+
+\section{Principe de métrologie centralisée}
+
+\hspace{3ex}La métrologie centralisée de notre cluster Docker représente notre résultat final. C'est une solution sous-jacente au concept de monitoring, tout comme la supervision. Pourtant, ces deux notions sont bien différentes et il est important d'être capable de les distinguer. Quand on parle de métrologie, cela signifie qu'on cherche à récupérer la charge d'un système et la tracer dans le temps, ainsi nous pourrons afficher et visualiser l'évolution de la charge, qui sera construite par l'ensemble des métriques récupérées dans le temps. En revanche, la supervision consiste seulement à récupérer l'état d'un service à l'instant T. Comprenez bien que les valeurs numériques jouent un rôle moins prépondérant dans le cas de la supervision. Néanmoins, elles restent présentes, par exemple dans le cas où on voudrait connaître l'espace de stockage sur un disque dur. Cependant, la plupart du temps nous cherchons seulement à savoir si le service supervisé est joignable ou non, auquel cas les valeurs numériques et l'aspect historique de charge n'entrent pas en compte contrairement à la métrologie.
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[scale=1]{images/graphmonitoring.png}
+    \caption{Représentation schématique du monitoring et ses concepts sous-jacents}
+    \label{fig:mesh1}
+\end{figure}
+
+Mais revenons à ce qui nous intéresse, la métrologie centralisée. Pour obtenir notre évolution de la charge, nous avons besoin de métriques que nous allons récupérer, garder et tracer dans le temps. Pour ce faire, nous aurons besoin de plusieurs outils : des sondes, des bases de données, des dashboards, et possiblement des systèmes de notifications. En revanche, il reste une contrainte à aborder : la centralisation. En effet, il est possible selon nos besoins de métrologie, que plusieurs sondes ou plusieurs échelles de temps soient nécessaires pour avoir une vue représentative de notre système, ce qui impliquerait que nous ayons plusieurs groupes de métriques à différents endroits. Malgré que nous pourrions nous affranchir de cette problématique de centralisation, la possibilité de visualiser l'évolution de toutes nos métriques au même endroit constitue un confort non négligeable. 
+
+
+\chapter{Docker}
+
+Puisque nous ne nous limitons pas au thème de la métrologie centralisée mais que nous l'appliquons au cas d'un cluster Docker, cette notion nous est également essentielle à la compréhension de ce qui suit.\newline
+
+Docker est une technologie qui permet d'empaqueter une application avec ses dépendances dans un conteneur virtuel et isolé qu'on pourra envoyer et faire fonctionner vers n'importe quel serveur Linux.  Alors que Docker ne fait pas partie des outils de métrologie à proprement parler, c'est une technologie qui n'en reste pas moins essentielle. Elle constitue souvent la base même de solutions de métrologie en raison de sa rapidité et sa facilité de mise en place d'applications, ainsi que pour ses aspects de transportabilité et de scalabilité.
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[scale=1]{images/Docker1.png}
+    \caption{Logo Docker}
+    \label{fig:mesh1}
+\end{figure}
+
+\section{La conteneurisation}
+
+Pour arriver à ses fins, Docker utilise ce que l'on appelle la technologie de conteneurisation. Si l'on veut comprendre le fonctionnement de ces conteneurs, il est alors intéressant de les comparer aux machines virtuelles.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=1]{images/graph1.png}
+    \caption{Schéma comparatif entre le fonctionnement de machine virtuelles et de conteneurs Docker}
+    \label{fig:mesh1}
+\end{figure}
+
+Tout d'abord, les technologies de conteneurisation (dont Docker fait partie) et la virtualisation permettent les unes comme les autres d'isoler une application pour la rendre opérationnelle dans plusieurs environnements. Quant aux différences, trois points sont à retenir : la transportabilité, la scalabilité et les performances.\newline
+
+D'une part, une machine virtuelle représente une émulation d'une machine par un logiciel sur une machine hôte. Ce logiciel d'émulation y simule la présence de ressources matérielles et logicielles telles que la mémoire, le processeur, le disque dur, le système d'exploitation et les pilotes. La machine virtuelle est capable d'exécuter des programmes grâce à l'allocation de ressources de l'hôte. En revanche, le poids se comptera en giga-octets.\newline
+
+D'autre part, les conteneurs regroupent en un ensemble cohérent et prêt à être déployé sur un serveur et son OS, une application et les éléments nécessaires à son bon fonctionnement (code de l'application, librairies, fichiers de configuration et dépendances requises). Le point fort de la conteneurisation réside dans le fait que les conteneurs ne contiennent pas d'OS puisque c'est le noyau du système hôte qui est utilisé (partagé si on a plusieurs conteneurs), ce qui apporte une certaine légèreté à ce type de technologie. \newline
+
+Cela se traduit par une facilité accrue de migration/téléchargement ou sauvegarde/restauration. D’où la notion de transportabilité. Mais en raison de leurs poids réduits, les conteneurs peuvent également redémarrer plus rapidement après chaque modification apportée à une application, c'est le concept de scalabilité.\newline
+
+Enfin, étant donné que les moteurs de conteneurs n'ont pas besoin d'émuler un OS complet contrairement aux hyperviseurs des machines virtuelles, on obtiendra de meilleures performances.
+
+\section{Un peu d'histoire}
+
+Auparavant, Docker était basé sur LXC (LinuX Containers), autrefois l'implémentation de référence de conteneurs dans Linux. L'idée consistait donc à utiliser LXC comme base et ajouter des capacités de niveau supérieur. Mais depuis la version 0.9 du logiciel, Docker a abandonné LXC comme environnement d'exécution par défaut en le remplaçant par son propre libcontainer, écrit en Go. Celui-ci, permet d'avoir accès à des fonctionnalités du kernel Linux qui sont essentielles au bon fonctionnement des conteneurs. Deux des plus importantes sont les espaces de noms, qui permettent d'empêcher un système de voir les ressources utilisées par le système hôte ou un autre conteneur, et les groupes de contrôle qui permettent de délimiter et isoler l'utilisation des ressources (processeur, mémoire, utilisation disque, …).
+
+
+\paragraph{Texte traduit du blog officiel de Docker : 
+}
+\begin{quote}
+    Docker peut désormais manipuler les espaces de noms, les groupes de contrôle, les capacités, les profils d'apparence, les interfaces réseau et les règles de pare-feu - le tout de manière cohérente et prévisible, et sans dépendre de LXC ou de tout autre package utilisateur. Cela réduit considérablement le nombre de pièces mobiles et isole Docker des effets secondaires introduits dans les versions et distributions de LXC. En fait, libcontainer a tellement amélioré la stabilité que nous avons décidé d'en faire la valeur par défaut. En d'autres termes, à partir de Docker 0.9, LXC est désormais facultatif.
+\end{quote}
+    
+ 
+\section{Fonctionnalité Swarm}
+
+Un Swarm est un cluster de machines qui exécutent le moteur Docker qui est un outil client-serveur. Ce cluster sera d'abord constitué d'un manager (il peut y avoir plusieurs managers mais un seul est élu leader des managers) puis ensuite nous joignons au Swarm d'autres machines qui constitueront des worker, chaque machine qui rejoint le Swarm est considérée comme une node.\newline
+ 
+Le rôle de ce manager est d'orchestrer et de déployer les différents services (terme qui désigne des conteneurs dans le contexte d'un Swarm).
+
+Le rôle des worker est seulement de fournir de la capacité, elles ne peuvent pas ordonner à d'autres machines ce qu'elles peuvent faire ou non contrairement aux machines managers. \newline
+
+Une fois un conteneur (maintenant appelé service dans le contexte Swarm) lancé, une ou plusieurs tâches (en fonction de ce qu'on a défini) sont exécutées sur les nodes disponibles. Cette fonctionnalité de Docker contient également un équilibreur de charge qui permet de répartir les tâches afin de pouvoir mieux supporter la charge.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=1]{images/graph2.png}
+    \caption{Schéma d'une réplication avec Docker Swarm}
+    \label{fig:mesh1}
+\end{figure}
+
+Le fonctionnement de Swarm est linéaire. Par-là, nous sous-entendons que le Swarm manager passe par différents états lors de la création de service (assigné, préparé, en cours d'exécution). Le manager fait office d'orchestrateur / planificateur pour l'usage général du cluster où il a la possibilité d'équilibrer la charge sur les différentes nodes à sa disposition. Mais le manager ne fait pas cela bêtement, en effet lorsqu'un incident dans la création du service intervient, le manager crée une nouvelle tâche et supprime le conteneur "corrompu" en fonction de l'état spécifié pour le service par le manager.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.4]{images/fct-docker-swarm.png}
+    \caption{Schéma des différentes étapes par lesquelles Docker Swarm passe pour la création d'un service}
+    \label{fig:mesh1}
+\end{figure}
+
+\chapter{Métrologie}
+
+\section{Schéma d'architecture général}
+
+Ci-dessous, nous allons voir un cas général d'une solution de monitoring d'un cluster Docker, représentatif de ce qui pourrait être utilisé en entreprise.
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[scale=0.75]{images/InfraGlobal.png}
+    \caption{Schéma du cas général d'un monitoring clusterisé - légende : rouge = récupération des métriques par la sonde, vert = récupération des métriques de la sonde par le logiciel de gestion des données, bleu = transfère des données vers la BDD, violet = envoi des données au logiciel de monitoring, jaune = visualisation des données par la machine monitoring}
+    \label{fig:mesh1}
+\end{figure}
+
+Dans le cas où on veut monitorer une application ou une machine il faut avant tout un logiciel qui va permettre d'analyser l'activité de la cible, une sonde, la sonde sera souvent adaptée à cette cible s'il s'agit d'une application, application web, application conteneurisée ou une machine physique, quelques exemples de ces sondes sont cAdvisor ou Node Exporter. Ensuite si on veut pouvoir visualiser des métriques de plusieurs applications en même temps, il faut un logiciel de monitoring comme Grafana mais il n'est pas capable nativement de lire les métriques de toutes les sondes. Si le logiciel de monitoring ne peut pas lire les métriques qu'il reçoit, il faut un logiciel intermédiaire de gestion des données comme Prometheus qui va être capable de lire la plupart des métriques pour les rendre à un format accessible aux outils de monitoring. Et pour finir, si on veut avoir accès aux données sur le long terme une base de données sera généralement mise en place afin de stocker les métriques. \newline
+
+\section{Communication entre logiciels}
+
+Au fil des technologies que nous présentons dans ce rapport nous mentionnons plusieurs fois la notion d'endpoint, étroitement liée aux notions de sockets et d'API qui permettent de communiquer des ressources entre nos solutions. C'est pourquoi nous avons décidé d'y consacrer une partie. \newline
+
+Souvent en informatique, pour permettre à deux systèmes qui n'ont pas la même architecture de communiquer entre eux pour échanger des ressources, nous utilisons une API. Celle-ci fonctionne par “demandes” et “réponses”, elle va définir ce qui est attendu d'un côté comme de l'autre. \newline
+
+Mais cette communication n'est pas possible sans la notion d'endpoints, ou points de terminaisons, puisque chacun représente une extrémité d'un canal de communication. Concrètement, ce sont une combinaison d'une IP et d'un numéro de port. C'est l'endroit où les API envoient les demandes et où réside la ressource qu'on souhaite échanger. \newline
+
+Enfin, nous avons les sockets. Ce sont eux qui permettent une communication interprocessus bidirectionnelle entre deux endpoints. Dans le cas d'une communication distante, nous avons recours à des sockets tcp. Dans le cas contraire, nous avons aussi des sockets unix qui utilisent le système de fichiers local.
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[scale=0.75]{images/communication.png}
+    \caption{Illustration ludique d'une communication par API}
+    \label{fig:mesh1}
+\end{figure}
+
+\chapter{Outils de métrologie}
+\section{Les Sondes}
+
+Maintenant que les bases ont été posées, nous allons présenter plusieurs outils viables pour aboutir à une quelconque solution de métrologie. Commençons par les sondes. 
+
+\subsection{cAdvisor}
+
+Aujourd'hui, les conteneurs sont largement utilisés du développement jusqu'en production. En revanche, les fonctionnalités fournies par les solutions de conteneurisation comme Docker ne permettent pas d'anticiper les dysfonctionnements de son environnement de production. C'est alors que de nouvelles solutions sont nées pour répondre à des besoins nouveaux émergeant de cette constatation, l'une d'entre elles se nomme cAdvisor.
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[scale=0.7]{images/cAdvisor.png}
+    \caption{Logo de cAdvisor}
+    \label{fig:mesh1}
+\end{figure}
+
+C'est un outil qui va nous permettre de récupérer les métriques des conteneurs qui s'exécutent sur notre machine, ou node Docker dans notre cas. Au sens général les métriques représentent une compilation de mesures issues des propriétés techniques ou fonctionnelles d'un logiciel, elles peuvent être classées sous différentes catégories mais dans notre cas il est question de qualité applicative. Plusieurs indications quant aux ressources utilisées s'offrent à nous (cpu, ram, network pour chaque conteneur). Enfin, si l'on souhaite exporter ces données, cAdvisor expose un endpoint (http://cadvisor:8080/metrics) regroupant l'ensemble des métriques des conteneurs.
+
+\subsection{Node Exporter}
+
+Désormais, nous sommes en capacité de collecter les métriques de nos conteneurs mais pas encore celles de nos hôtes Linux. Pour répondre à cette problématique nous utiliserons la solution Node Exporter, fournie par Prometheus.
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[scale=1]{images/prometheus.PNG}
+    \caption{En-tête de la page GitHub officielle de Node Exporter}
+    \label{fig:mesh1}
+\end{figure}
+
+Tout comme cAdvisor, un endpoint sera exposé (http://localhost:9100/metrics) regroupant les métriques de notre machine (processeur, mémoire, disques, systèmes de fichiers, suivi du réseau). Nous déploierons également cette solution sous forme de service au sein de notre cluster (une instance sur chaque node).
+
+\section{Prometheus}
+
+Prometheus est un projet open-source issu de la plateforme musicale SoundCloud, son objectif est de monitorer les métriques de fonctionnement des serveurs et de créer une gestion d'alertes en fonction de seuils considérés critiques. Il repose sur un modèle d'extraction de endpoints HTTP pour enregistrer les données collectées en temps réel. 
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[scale=1]{images/prometheus2.PNG}
+    \caption{Logo de Prometheus}
+    \label{fig:mesh1}
+\end{figure}
+
+\subsection{Exportateurs Prometheus}
+
+Ces données en question sont collectées par des exportateurs (dont cAdvisor et Node Exporter font partie). Prometheus en propose un large catalogue dans sa documentation, certains sont maintenus officiellement par Prometheus et d'autres proviennent de contributions tierces (il existe aussi des logiciels tiers qui exportent directement leurs métriques au format Prometheus, comme Kubernetes par exemple). L'exportateur est composé de deux éléments :
+
+\newpage
+
+\begin{itemize}
+
+    \item Des capacités logicielles qui vont générer des données métriques 
+
+    \item Un serveur HTTP qui expose la métrique générée disponible via un point de terminaison particulier.
+
+\end{itemize}
+
+Enfin, le serveur Prometheus peut lire et capturer (ou \emph{scrape} pour les anglophones) les métriques qui auront été publiées selon un format spécifique.\newline
+
+Il existe plusieurs types de métriques Prometheus mais les principaux sont les suivants :
+
+\begin{itemize}
+
+    \item Le compteur, une métrique cumulative représentant un compteur croissant, dont la valeur peut seulement augmenter ou être remise à zéro au redémarrage.
+    
+    \item La jauge, une métrique qui représente une valeur numérique qui peut monter et descendre arbitrairement.
+    
+\end{itemize}
+
+\subsection{Fonctionnement de Prometheus}
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[scale=1]{images/graph5.PNG}
+    \caption{Schéma d'architecture de base d'un environnement Prometheus avec un composant serveur, deux composants client et un système de visualisation externe}
+    \label{fig:mesh1}
+\end{figure}
+
+Pour la collecte de données Prometheus est basé sur le “pull”, un concept largement répandu dans différents secteurs qui a pour principe de créer un flux de travail dans lequel le travail n'est effectué que s'il y a une demande pour celui-ci. Le but est de réduire les gaspillages dans tout processus de production. C'est donc Prometheus qui se connecte aux agents pour récupérer les métriques et pas l'inverse.
+
+\begin{itemize}
+
+    \item Les exportateurs collectent leurs métriques et les exposent en HTTP
+    
+    \item Le serveur Prometheus va récupérer les métriques auprès des exportateurs, et les stocker sur disque ou ailleurs (via une fonction remote\_write) 
+
+    \item Il va exposer un endpoint en HTTP pour permettre aux autres composants d'exécuter des requêtes PromQL pour accéder aux métriques
+
+\end{itemize}
+
+Enfin, nous avons aussi l'interface web qui nous permet de voir l'état de notre instance Prometheus mais aussi de requêter les métriques. En revanche, Grafana apporte plus de fonctionnalités en termes de visualisation.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=1]{images/graph6.PNG}
+    \caption{Schéma présentant le fonctionnement global de Prometheus}
+    \label{fig:mesh1}
+\end{figure}
+
+\subsection{Base de données de séries temporelles}
+
+Pour stocker les métriques, Prometheus comprend une base de données conçue spécialement pour gérer des données temporelles. Elle est à dénoter d'une base de données relationnelle, ou SGBD, dans laquelle des tables contiennent des colonnes et des lignes où chacune d'entre elles représente une entrée dans notre table. Dans une base de données de séries temporelles, les données sont toujours stockées dans des “collections” mais elles sont désormais agrégées au fil du temps, c'est-à-dire qu'un horodatage est associé à chaque entrée.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.48]{images/diff-db.png}
+    \caption{Schéma comparatif des principes d'une base de données relationnelle et d'une base de données de séries temporelles}
+    \label{fig:mesh1}
+\end{figure}
+
+L'avantage des bases de données de séries temporelles repose dans leur conception, pensée pour insérer des données de manière rapide et efficace. Au contraire, les SGBD perdent vite en performances au fil des nouvelles entrées qui s'accumulent (la présence d'index dans les tables fait également pencher la balance) et il devient de plus en plus difficile de lire nos données avec la charge qui augmente. Ainsi, les deux types de bases de données démarrent sur des performances assez uniformes, mais avec de gros volumes de données celles-ci déclinent rapidement pour les SGBD tandis que les bases de données de séries temporelles parviennent à garder un taux d'insertion plutôt constant en raison de leur optimisation.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.75]{images/diff-sgbd-tsdb.png}
+    \caption{Schéma comparatif entre les performances des bases de données relationnelles et des bases de données de séries temporelles}
+    \label{fig:mesh1}
+\end{figure}
+
+En revanche, la limite de Prometheus et sa base de données se trouve dans la conservation des données. En effet, il est fort probable que les données que stocke Prometheus ne nous intéressent pas sur le long terme. Là où nous voulons en venir est que ces données vont continuer de s'accumuler au fil du temps et prendre beaucoup d'espace de stockage. Ainsi, à moins que nous soyons intéressés par d'anciennes données, nous allons vouloir les supprimer pour des raisons de coûts. C'est alors qu'une solution nommée InfluxDB prend tout son intérêt.
+
+\newpage
+
+\section{InfluxDB}
+
+\subsection{Présentation}
+
+InfluxDB est une base de données open-source spécialisée dans le stockage de séries temporelles. Ces séries temporelles peuvent correspondre à n'importe quelles “mesures” (exemples: température, utilisation processeur, espace disque utilisé, ...) prises régulièrement par des sondes. Cependant, cette technologie s'est améliorée et est devenue un outil performant de supervision, tout comme Prometheus.\newline
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[scale=0.8]{images/Influx.png}
+    \caption{Logo d'InfluxDB}
+    \label{fig:mesh1}
+\end{figure}
+
+Dans le cadre de ce projet tutoré, nous utilisons InfluxDB sous sa version 1.8. C'est-à-dire qu'elle n'est simplement considérée que comme une base de données stockant les métriques issues de la métrologie, et rien d'autre.\newline
+
+Cette technologie vient donc substituer la base de données de séries temporelles déjà présente sur Prometheus. Le paramétrage de cette substitution se fait essentiellement dans la configuration de Prometheus. Préalablement, il est possible de dire à la première instance d'InfluxDB de créer une première base, afin que Prometheus puisse y écrire et lire.\newline
+
+Une des fonctionnalités essentielles pour ce projet que nous allons détailler par la suite est l'échantillonnage des données, ce qui va nous permettre de garder un grand nombre d'informations concernant la métrologie, en consommant le moins d'espace disque possible.
+
+\subsection{Fonctionnement}
+
+Cette technologie nous offre les fonctionnalités suivantes : \newline
+
+\begin{itemize}
+
+    \item Premièrement, afin de pouvoir installer et configurer proprement InfluxDB, celui-ci propose un \emph{shell} (invité de commande). Ce shell attend en entrée des requêtes InfluxQL (proche du SQL) ainsi que quelques autres commandes pour la configuration globale du logiciel. Une autre façon de faire est de modifier le fichier de configuration d'InfluxDB (ou par les variables d'environnements sous Docker) pour créer l'utilisateur initial, son organisation, ainsi qu'une première base de données.
+    \newline
+    
+    \item Comme dit précédemment, InfluxDB utilise le langage InfluxQL, puis Flux depuis sa version 2. InfluxQL est proche du langage SQL, ce qui n'est pas le cas de Flux.
+    \newline
+    
+    \item InfluxDB met en place une \emph{API} lui permettant de recevoir des requêtes. Elle est accessible par des requêtes HTTP en accédant aux différents endpoints. Les informations nécessaires pour lire et écrire les données sont à la fois dans l'URL de la requête mais aussi dans l'en-tête HTTP. C'est de cette façon que Prometheus peut se servir d'InfluxDB comme stockage distant.
+    \newline
+    
+    \item \emph{Authentification par HTTP} : Il y a deux manières de se connecter à l'API. La première est l'authentification par un \emph{jeton}, qui doit être transmis au client distant. Celui-ci le renseigne dans son en-tête HTTP. La deuxième façon de s'identifier est de renseigner \emph{un nom d'utilisateur et un mot de passe} dans l'en-tête HTTP ou directement dans l'URL.\newline
+    
+    \item Pour répondre au besoin d'une supervision à différentes échelles de temps, nous pouvons mettre en place des \emph{politiques de rétention} ainsi que des \emph{requêtes continues} (permet de définir une résolution de temps aux données enregistrées, mais surtout la durée de vie de ces données). C'est sur cette fonctionnalité qu'est possible l'échantillonnage  des données. Nous détaillons plus en détails la façon dont nous pouvons conserver les données dans notre cas d'expérimentation.
+    
+\end{itemize}
+
+\newpage
+
+\section{Grafana}
+
+Grafana est un logiciel libre qui permet de créer des graphiques et des tableaux de bord venant de sources variées avec des données brutes. Il peut également avoir comme source des bases de données temporelles comme InfluxDB, ce qui en fait un outil de monitoring centralisé très complet et efficace. 
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[scale=0.75]{images/grafana.PNG}
+    \caption{Logo de Grafana}
+    \label{fig:mesh1}
+\end{figure}
+
+\subsection{Fonctionnalités de Grafana}
+
+Grafana est la partie visible et visuel du monitoring, depuis celui-ci on pourra :
+
+\begin{itemize}
+
+    \item Sélectionner des sources de données variées à exploiter
+    
+    \item Les organiser dans des dashboards que l'on peut soit créer nous-même ou les récupérer dans le Grafana Lab
+    
+    \item Un menu qui répertorie tous les dashboards pour pouvoir les partager, faire des snapshots, …
+    
+\end{itemize}
+
+
+
+\subsection{Data Source}
+
+Pour récupérer les données Grafana utilise les “data source” qui permettent de configurer rapidement une source de données à partir de l'endpoint d'une des nombreuses applications de gestion des données existante comme Azure Monitor, AWS CloudWatch, PostgreSQL, Prometheus ou encore InfluxDB, chaque data Source se paramètre de manière différente en fonction de ses besoins ce qui donne un aspect très versatile et inter-compatible à Grafana.
+
+\subsection{Les Dashboards}
+
+Une fois notre Data Source crée on peut ensuite configurer nos dashboards, un dashboards est un menu regroupant des graphiques très visuels appeler panel qui vont permettre de voir l'état des métriques reçus. Chaque dashboards va pouvoir posséder plusieurs panels pour visualiser les informations les plus intéressantes. Si on démarre d'un dashboard vide aucun panel ne sera visible, il faudra crée ses propres panels ce qui peut être complexe et assez fastidieux. Une autre solution consiste à utiliser des dashboards préconçus disponible sur le GrafanaLabs en fonction de nos besoins, le GrafanaLabs est un site qui entre autres permet à la communauté d'échanger ses dashboards en fonction de leur utilité.    \newline
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[scale=0.35]{images/GrafanaGauge.png}
+    \caption{Le menu d'édition d'un panel Grafana}
+    \label{fig:mesh1}
+\end{figure}
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[scale=1]{images/grafana2.PNG}
+    \caption{Capture d'écran du dashboard des métriques de Node Exporter}
+    \label{fig:mesh1}
+\end{figure}
+
+\chapter{Les applications web}
+
+%Si nous mettons en place 
+
+\section{WordPress}
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[scale=0.7]{images/wordpress.PNG}
+    \caption{Logo de WordPress}
+    \label{fig:mesh1}
+\end{figure}
+
+WordPress est un CMS (système de gestion de contenu) open-source et est le CMS le plus utilisé au monde, 41,5 \% des sites web dans le monde utilisent WordPress. Il est si utilisé car cette solution gratuite permet de mettre en place très rapidement un site avec des objectifs variés comme un blog, un site vitrine ou un site de ventes sans aucune connaissances en programmation mais en ayant tout de même une personnalisation poussée grâce aux nombreuse extensions développées autour de WordPress par des entreprises professionnelles ou encore des templates qui permettent d'avoir une identité visuel pré-faite et préconçus en fonction de nos besoins comme l'e-commerce ou la promotions d'un produit.  \newline
+
+\newpage
+
+\section{MailCow}
+
+Typiquement, sur un cluster Docker, nous pouvons également héberger un serveur mail. C'est pourquoi nous avons choisi de présenter MailCow.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.75]{images/mailcow.PNG}
+    \caption{Logo de MailCow}
+    \label{fig:mesh1}
+\end{figure}
+
+MailCow est une suite de serveurs de messagerie basée sur plusieurs logiciels open-source. Nous l'avons mis en place via sa version Dockerized qui utilise plusieurs conteneurs Docker, dont chacun contiendra une seule application, liés par un réseau “bridge”. Ces conteneurs utilisent également des volumes pour conserver des données dynamiques. Parmi les logiciels utilisés par MailCow, nous pouvons citer :
+
+\begin{itemize}
+
+    \item Dovecot
+    
+    \item Oletools via Olefy
+    
+    \item Memcached
+    
+    \item Redis
+
+    \item MariaDB
+
+    \item Unbound
+    
+    \item PHP
+    
+    \item Postfix
+    
+    \item Let's Encrypt
+
+    \item Nginx
+
+    \item Rspamd
+    
+    \item SOGo
+    
+    \item Netfilter
+    
+    \item Un “Watchdog” pour la surveillance de base
+
+\end{itemize} \newline
+
+Une fois que tous les conteneurs sont lancés et fonctionnels, nous pouvons accéder à l'interface utilisateur intégrée qui va nous permettre d'administrer notre instance de serveur de messagerie. D'ailleurs celle-ci nous fournit un accès séparé pour l'administrateur de domaine et l'utilisateur de la boîte aux lettres. Parmi les fonctionnalités de MailCow nous retrouverons celles-ci :
+
+\begin{itemize}
+
+    \item Prise en charge de DKIM et ARC
+    
+    \item Blacklists et Whitelists par domaine et par utilisateur
+    
+    \item Gestion des Spam par utilisateur (reject spam, mark spam, greylist)
+    
+    \item Autoriser les utilisateurs de boîtes aux lettres à créer des alias de spam temporaires
+    
+    \item Ajouter des balises de courrier au sujet ou déplacer le courrier dans un sous-dossier (par utilisateur)
+    
+    \item Autoriser les utilisateurs de boîtes aux lettres à basculer entre l'application TLS entrante et sortante
+    
+    \item Autoriser les utilisateurs à réinitialiser les caches d'appareils SOGo ActiveSync
+
+    \item imapsync pour migrer ou extraire régulièrement des boîtes aux lettres distantes
+    
+    \item Authentification à deux facteurs : Yubikey OTP, U2F USB ou TOTP
+    
+    \item Ajouter des domaines, des boîtes aux lettres, des alias, des alias de domaine et des ressources SOGo
+    
+    \item Ajouter des hôtes sur liste blanche pour transférer le courrier vers MailCow
+    
+    \item Intégration d'un Fail2ban-like
+    
+    \item Système de quarantaine
+
+    \item Analyse antivirus
+    
+    \item Surveillance de base intégrée
+    
+\end{itemize}
+
+\section{Gatling}
+
+Gatling est un outil open-source de test de charge et de performance pour les applications web. Il permet de simuler des réelles charges utilisateurs sur une infrastructure contenant un ou plusieurs services web. Les tests de charge, appelés simulations par Gatling, sont écrits sous forme de programmes en Java, Kotlin, ou Scala. 
+\newline
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[scale=0.5]{images/Gatling-Logo.png}
+    \caption{Logo de Gatling}
+    \label{fig:mesh1}
+\end{figure}
+
+Les simulations introduisent la notion de scénario. Un scénario est une succession logique d'évènements utilisateurs (appui sur un bouton, chargement de média, création d'un commentaire, …) qu'un utilisateur est amené à faire sur une application web. Parallèlement, dans ces programmes sont écrits les en-têtes HTTP utilisées dans les différents scénarios. On a donc un contrôle total de l'interaction entre le client et le serveur web.
+\newline
+
+La dernière partie de ces programmes sont le paramétrage de la simulation. Il s'agit d'introduire un nombre quelconque d'utilisateurs pour chaque scénario. Les méthodes pour introduire les utilisateurs sont nombreuses et précises, donc un haut niveau de personnalisation est possible sur ce point-là. Par exemple, on est capable d'insérer un certain nombre d'utilisateur par seconde de façon constante, progressive ou dégressive pendant une période voulue. 
+\newline
+
+Finalement, les résultats des tests de charge, donc de l'exécution d'un programme, est exporté à la fin de la simulation. Le format du résultat est en HTML, et il est plutôt plaisant à analyser.
+\newline
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[scale=0.5]{images/exRenduGatling.PNG}
+    \caption{Exemple de rendu sur Gatling}
+    \label{fig:mesh1}
+\end{figure}
+
+En soit, Gatling n'est pas un outil nécessaire pour la métrologie et sa supervision, mais c'est un bon moyen de simuler des charges réelles qu'une entreprise supporte au quotidien. Sa mise en place est externalisée à l'infrastructure dont nous voulons tester les performances, puisque Gatling simule des utilisateurs externes.
+
+\chapter{Cas d'expérimentation}
+
+Désormais nous allons mettre en place un cadre plus restreint dans lequel nous chercherons à approcher le problème général.
+
+\section{Schéma d'architecture}
+
+Pour ce faire, voici les schémas qui permettront de mieux se situer avant de suivre le cheminement des différentes technologies qui nous permettront d'aboutir à notre solution de métrologie :
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[scale=1]{images/MindMapManager.png}
+    \caption{Schéma de notre machine manager - légende : vert = logiciel que l'on peut visualiser, rouge = trajet des métriques}
+    \label{fig:mesh1}
+\end{figure}
+
+La machine manager est en soit très simple, la machine créatrice du Docker Swarm qui va permettre de répliquer les conteneurs présents dans les autres machines du Swarm comme celle de worker par exemple. Malgré sa fonction importante ses composantes sont plutôt simples, il n'y a pas d'application importante à part le Swarm, on le monitore donc avec cAdvisor pour récupérer les métriques des conteneurs et Node\_exporter pour avoir les métriques de la machine pour être sûr que lors d'une réplication des services tout se passe normalement. 
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[scale=0.7]{images/MindMapworker.png}
+    \caption{Schéma de notre machine worker - légende : vert = logiciel que l'on peut visualiser, rouge = trajet des métriques}
+    \label{fig:mesh1}
+\end{figure}
+
+La machine worker est, comme son nom l'indique, la machine qui aura pour objectif d'exécuter les services orchestrés par la machine manager, nous avons dans notre cas deux services standard que l'on peut retrouver dans n'importe quelle entreprise. Un site web WordPress avec une base de données et un serveur de mail MailCow. Comme pour le manager cAdvisor va monitorer les conteneurs et Node Exporter va nous donner une vision globale de la machine, nous avons en dehors de la machine Gatling qui va nous permettre de faire les différents tests de charges pour tester l'infrastructure et le site WordPress. 
+
+\newpage
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[scale=0.7]{images/MindMapMonitoring.png}
+    \caption{Schéma de notre machine monitoring - légende : vert = logiciel que l'on peut visualiser, rouge = trajet des métriques}    
+    \label{fig:mesh1}
+\end{figure}
+
+La machine monitoring a encore une fois un nom explicite, extérieur au Docker Swarm cette machine va regrouper toutes les solutions de monitoring, Prometheus qui va recueillir les métriques des machines worker et manager qui va ensuite les stocker et les relires depuis InfluxDB, en les visualisant grâce à Grafana. InfluxDB va d'ailleurs stocker les données avec des règles de rétentions particulières pour les besoins de supervision de données à longues rétention. Avec tout ce système, Grafana aura accès aux données avec trois temporalités différentes. La première, à court terme, est directement envoyée par Prometheus. Les deux autres, moyens et long terme, sont stockés et gérés par InfluxDB puis envoyés. Grafana nous permet donc de voir toutes nos données en fonction de la temporalité voulue.
+
+\newpage
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[scale=0.40]{images/MindMapTotal.png}
+    \caption{Schéma de notre infrastructure légende : vert = logiciel que l'on peut visualiser, rouge = trajet des métriques, jaune = test de Gatling sur WordPress, turquoise = accès entre la machine hôte et les machines virtuelle} 
+    \label{fig:mesh1}
+\end{figure}
+ 
+Voici le schéma global de notre infrastructure, nous avons donc nos trois machines : worker et manager qui font partie du Swarm et monitoring qui est extérieure au Swarm. Les sondes des machines du Swarm ( Node Exporter et cAdvisor ) récupèrent les métriques des conteneurs et des machines puis les envoient à Prometheus qui se trouve dans la machine monitoring. Prometheus peut ensuite envoyer ses métriques à nos outils de monitoring, il les envoie à Grafana qui va pouvoir afficher les métriques directement. Pour pouvoir afficher les métriques sur le moyen et le long terme Prometheus envoie les métriques à InfluxDB qui va traiter et stocker les données qui pourra ensuite les envoyés à Grafana qui pourra donc visualiser les métriques sur trois temporalités différentes.  
+
+\section{Mise en place}
+\subsection{Docker Swarm}
+
+Pour mettre en place notre cluster docker Swarm tout d'abord nous initions sur notre machine qui sera Manager un token unique qui aura pour but de reconnaître cette en tant que Manager et aussi d'utiliser ce token pour ajouter les machine dites worker à notre Swarm.
+\newline
+
+Voici à quoi devrait ressembler le token en question :
+\newline
+SWMTKN-1-0rwlvo0d11hjxmittvbeh41qe2rfgw00y13msi9msdpq9b04bh-axhj2igyw7z56o5erdycjlwdp 192.168.56.2:2377
+\newline
+
+Maintenant que le token est en notre possession nous pouvons ajouter notre machine worker à notre Swarm.
+Nous disposons donc de nos machines dans le Swarm, nous pouvons alors commencer la procédure de déploiement de services. Mais avant cela, nous activons les fonctionnalités expérimentales (réservées à des environnements de test) car la commande “docker deploy” ne fonctionne que dans cet environnement expérimental spécifique. Pour cela, il faut éditer un fichier daemon.json dans le répertoire /etc/docker et mettre le paramètre "expérimental" à la valeur “true”, puis relancer le service docker.
+Afin de lancer nos différents services pour notre infrastructure, nous avons un fichier nommé “docker-compose.yml” qui permet d'initier tous nos services avec les paramètres nécessaires, comme les images des services directement cherchées sur le Docker Hub, les machines sur lesquelles nous voulons lancer nos services, les volumes, les ports d'usage, et les dépendances. Grâce à ce fichier les services vont être lancés sur les machines seulement à partir de la machine Manager.\newline
+
+Avec la commande qui suit :
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.50]{images/dockerdeploy.PNG}
+    \caption{Capture de la création des services avec la machine Manager}
+    \label{fig:mesh1}
+\end{figure}
+
+Nous pouvons constater que les services sont bien lancés via le manager :
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.4]{images/service-manager.PNG}
+    \caption{Capture des services lancé sur la machine Manager}
+    \label{fig:mesh1}
+\end{figure}
+
+Et nous pouvons constater que les services sont lancés sur la machine worker :
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.45]{images/worker-service.PNG}
+    \caption{Capture des services lancé sur la machine worker}
+    \label{fig:mesh1}
+\end{figure}
+
+Afin de nous assurer que nos services sont bien lancés sur les machines voulues nous ajoutons un service de visualisation sur notre machine manager et nous pouvons bel et bien constater que nos services sont bien attribués aux bonnes machines :
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.4]{images/visu.png}
+    \caption{Capture du service de visualisation}
+    \label{fig:mesh1}
+\end{figure}
+
+\subsection{Sondes}
+
+Pour collecter les données de nos applications web, nous allons donc mettre en place des sondes. Étant donné que nous sommes toujours dans le cas d'un cluster, il faut garder à l'esprit qu'une sonde collecte les métriques seulement sur la machine sur laquelle elle s'exécute. Ainsi, nous devrons avoir une instance de chacune de nos sondes sur chaque machine de notre cluster. Commençons par mettre en place cAdvisor, la sonde qui nous permet de collecter et exporter les métriques de nos conteneurs Docker. \newline
+
+L'installation se fait sous forme de conteneurs que nous allons créer à partir d'une image provenant du Docker Hub. Nous l'adaptons à nos besoins en lui spécifiant des paramètres spécifiques et nous l'instancions de manière à obtenir notre conteneur. Une fois mis en place, nous avons accès à une interface de visualisation à l'URL http://<ip\_de\_la\_machine>:8080
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.5]{images/cAdvisorSQL.png}
+    \caption{Capture de l'interface cAdvisor}
+    \label{fig:mesh1}
+\end{figure}
+
+Mais cette interface est plus limitée que Grafana et ne nous intéresse donc pas. De plus, nous cherchons à centraliser nos métriques. C'est pourquoi cAdvisor expose un endpoint à l'adresse : http://<ip\_de\_la\_machine>:8080/metrics dans un format compatible avec des logiciels de gestion de données que nous verrons dans la partie suivante. \newline
+
+Avant cela il nous reste à parler brièvement de Node Exporter. Pour rappel, cette sonde nous permet de collecter et exporter les métriques concernant les performances de nos machines. L'installation se fait de la même manière que pour cAdvisor et le mode de fonctionnement est similaire aussi, l'endpoint exposé est le suivant : http://192.168.56.3:8080/metrics . La différence est que Node exporter ne possède aucune interface graphique.
+
+\subsection{Prometheus}
+
+Pour gérer les données collectées nous utilisons Prometheus, c'est lui qui va rassembler les données de nos différentes sondes dans sa base de données de séries temporelles.\newline
+
+Pour le mettre en place nous lui définissons un service dans lequel nous spécifions notamment son fichier de configuration ainsi que des volumes qui permettent la persistance des données après un redémarrage de Prometheus :
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.8]{images/prometheus-docker-yml.png}
+    \caption{Définition du service prometheus}
+    \label{fig:mesh1}
+\end{figure}
+
+Une fois notre service prometheus défini, nous aurons également besoin d'un fichier de configuration avant de pouvoir le lancer. C'est dans ce fichier de configuration que nous allons lui dire de récupérer les métriques auprès de "jobs". Nous leur donnons un nom, un intervalle à laquelle Prometheus va récupérer les données et l'endpoint exposé par la sonde auprès de laquelle nous voulons récupérer les métriques. 
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.8]{images/prometheus.png}
+    \caption{Fichier de configuration de Prometheus (promeheus.yml)}
+    \label{fig:mesh1}
+\end{figure}
+
+\subsection{InfluxDB}
+
+Dans notre cas d'expérimentation, l'utilisation que nous voulons faire d'InfluxDB c'est de remplacer la base de données de séries temporelles déjà présente sur Prometheus. \newline
+
+Premièrement, il faut configurer la base pour qu'elle soit opérationnelle. Il nous faut donc :
+\begin{itemize}
+    \item Un utilisateur et son mot de passe
+    \item Une première base de données
+    \item Une API fonctionnelle pour faire des requêtes depuis Prometheus
+    \item Avoir différents niveaux de rétention des données
+\end{itemize}
+
+\subsubsection{Première instance}
+Pour installer InfluxDB, il suffit d'installer le paquet associé, ou, comme nous le faisons, de lancer la version conteneurisée de DockerHub. A savoir que l'image produite est bel et bien officielle. \newline
+
+Voici le paramétrage que nous avons introduit à notre cas d'expérimentation : \newline
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=1]{images/path_influx_dk.png}
+    \caption{Variables d'environnement concernant InfluxDB}
+    \label{fig:mesh1}
+\end{figure}
+
+Par ces variables là nous créons une première base nommée "prometheus" avec un compte "influxadmin" administrateur. Ces noms de variable peuvent changer d'une version à une autre, notamment pour la version 2 où les bases de données sont remplacées par la notion de bucket.\newline
+
+\subsubsection{Prometheus}
+
+Ajoutons maintenant à la configuration de Prometheus les paramètres nécessaires pour qu'il puisse contacter l'API de InfluxDB.\newline
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.8]{images/pymlinflux.png}
+    \caption{Configuration de l'API InfluxDB sur Prometheus}
+    \label{fig:mesh1}
+\end{figure}
+
+Il y deux paramètres : le "remote\_write", et le "remote\_read". L'adresse "192.168.56.4" correspond à la machine de monitoring, c'est-à-dire celle où nous avons Prometheus, Grafana et Influx qui sont actifs. Nous sommes contraints de renseigner cette adresse plutôt que le nom "localhost" car nous avons des problèmes de résolution de nom de domaine à ce niveau-là dans notre environnement de test. \newline
+
+A cette adresse-là nous pointons le port "8086" qui correspond au port de InfluxDB, et les suites "/api/v1/prom/write" et "/api/v1/prom/read" sont les endpoints accessibles pour écrire les lire les données. Il n'y a pas besoin d'activer l'API car elle est mise en place par défaut lors de l'installation.\newline
+
+Le reste de l'url "?u=influxadmin\&p=influxadmin\&db=prometheus", c'est l'utilisateur, son mot de passe et la base de données que Prometheus va utiliser pour effectuer ses requêtes. Nous on utilise l'utilisateur administrateur, la sécurité de l'infrastructure n'étant pas le but premier de notre projet.\newline
+
+Vérification de l'opération :\newline
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.5]{images/influx3.png}
+    \caption{Capture d'écran des données d'InfluxDB}
+    \label{fig:mesh1}
+\end{figure}
+Les données issues des métriques se retrouvent bien dans la base "prometheus", dans l'exemple ci-dessus nous pouvons voir les données issues de la table "node\_timex\_status". De par son nom nous comprenons ici qu'il s'agit de métriques récoltées par les sondes Node Exporter. Nous avons précisément la source de chaque donnée dans la colonne "instance".\newline
+
+\subsubsection{Politiques de rétention}
+
+Dans cette partie, nous faisons l'échantillonnage  des données issues de Prometheus. Le niveau de précision de ces données dépend directement de l'intervalle de temps défini sur les sondes pour récolter les métriques. \newline
+
+Voici ce que nous mettons en place :
+\begin{itemize}
+\item Les données à courte rétention sont générées par Prometheus
+\item La rétention moyenne par échantillonnage  des données à courte rétention
+\item La rétention longue par échantillonage des données à moyenne rétention
+\end{itemize}
+
+\newline
+Pour chacun de ces 3 points, il est nécessaire de mettre ce que l'on appelle une politique de rétention, c'est-à-dire la durée de temps pendant laquelle nous conservons les données. \newline
+
+\textbf{Pour la rétention courte :}\newline
+{\fontsize{9}{10}\selectfont CREATE RETENTION POLICY "rp\_court" ON "prometheus" DURATION 4w REPLICATION 1 DEFAULT}\newline
+
+\textbf{Pour la rétention moyenne :}\newline
+{\fontsize{9}{10}\selectfont CREATE RETENTION POLICY "rp\_moy" ON "prometheus" DURATION 12w REPLICATION 1}\newline
+
+\textbf{Pour la rétention longue :}\newline
+{\fontsize{9}{10}\selectfont CREATE RETENTION POLICY "rp\_long" ON "prometheus" DURATION 1y REPLICATION 1}\newline
+
+En faisant comme cela, nous définissons la première politique de rétention comme par défaut sur les données reçues, grâce au mot-clé "DEFAULT". Les autres politiques sont utilisées dans ce qui suit.
+
+\subsubsection{Requêtes continues}
+
+Nous allons définir des requêtes continues. Comme leur nom l'indique, ce sont des requêtes InfluxQL qui sont exécutés, non pas vraiment en continu, mais à intervalles de temps régulières. Le but de ces requêtes, c'est de regrouper toutes les données de la base, et d'en effectuer l'échantillonnage selon une échelle de temps donnée. \newline
+
+\textbf{Pour la rétention courte :} Pas besoin de requêtes, nous avons ces données naturellement. Leur résolution est de 5 secondes sur les 4 dernières semaines.\newline
+
+\textbf{Pour la rétention moyenne :}\newline
+{\fontsize{9}{10}\selectfont CREATE CONTINUOUS QUERY "cq\_moy" ON "prometheus" BEGIN SELECT mean(value) AS value, min(value) AS min, max(value) AS max INTO "prometheus"."rp\_moy".:MEASUREMENT FROM "prometheus"."autogen"./.*/ GROUP BY time(60s),* END}\newline
+
+Soit une résolution d'une minute sur les 12 dernières semaines, en se basant sur les données à courte rétention.\newline
+
+\textbf{Pour la rétention longue :}\newline
+{\fontsize{9}{10}\selectfont CREATE CONTINUOUS QUERY "cq\_long" ON "prometheus" BEGIN SELECT mean(value) AS value,mean(max) AS max, mean(min) AS min INTO "prometheus"."rp\_long".:MEASUREMENT FROM "prometheus"."rp\_moy"./.*/ GROUP BY time(1800s),* END}\newline
+
+Soit une résolution de 30 minutes sur la dernière année, en se basant sur les données à moyenne rétention. \newline
+
+Concernant tous ces niveaux, il est possible de voir les rendus graphiques sur Grafana, que nous allons maintenant ajouter à notre cas d'expérimentation.
+
+\subsection{Grafana}
+
+Grafana va nous permettre de visualiser les métriques centralisées par Prometheus et stockés par InfluxDB.\newline 
+
+Comme pour les autres services conteneuriser sont installation se fait dans la machine monitoring seulement via le fichier docker-compose-monitoring.yml
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=1]{images/Grafanayml.png}
+    \caption{Définition du service Grafana dans le fichier docker-compose-monitoring.yml}
+    \label{fig:mesh1}
+\end{figure}
+
+On définit ce service d'abord par l'image qui va être prise sur le Docker Hub qui est l'image standard de Grafana, le nom du conteneur, les ports d'accès qui sont laissés par défauts et le volume qui est l'emplacement fichier ou Grafana va pouvoir stocker les informations dont il aura besoin.\newline 
+
+Pour le reste de la mise en place tout se passe sur l'API web de Grafana, on s'y connecte à l'adresse : http://<ip\_de\_la\_machine>:3000\newline
+
+On tombe sur la page de connexion où le login / mot de passe de base est admin / admin, on choisit un nouveau mot de passe et nous sommes connecter à l'interface Grafana.\newline
+
+La première chose à faire dans Grafana est d'implémenter notre Data Source, pour ce faire, on va dans le menu ( à gauche ), configuration ( engrenages ) et le menu Data Source, à partir de là on arrive dans le menu des data source où toutes nos data sources seront répertoriées. Il n'y en a de base aucune on peut donc rajouter la première en cliquant sur "Add data source".\newline
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.75]{images/GrafanaDataSourceChoix.png}
+    \caption{Menu de configuration de la data source de Prometheus}
+    \label{fig:mesh1}
+\end{figure}
+
+Ici nous importons une Data Source Prometheus qui a donc ses propres paramètres, nous gardons toutefois une installation par défaut, nous allons simplement dans notre cas indiquer l'URL de l'endpoint de Grafana qui est le : http:///<ip\_de\_la\_machine>:9090 . Ensuite, on configure les sources de données avec l'URL de la source, ce qui permet d'avoir plusieurs sources du même type ( plusieurs sources Prometheus par exemple ) on peut également choisir la manière d'y accéder soit via le serveur qui l'héberge soit par l'API en ligne.
+
+On peut également configurer l'authentification et les protocoles TLS pour renforcer la sécurité et la fiabilité des données transmises.\newline
+
+Avec Grafana on peut gérer l'accès de l'AlertManager de Prometheus, nous ne l'avons pas activé mais s'il est activé on peut simplement sélectionner la data source de l'AlertManager et activer l'alerting pour recevoir des mails d'alerte dès que la data source prometheus repère un problème.\newline 
+
+Dans notre cas, nous devons également créer la Data Source d'InfluxDB, la manière de la créer est très similaire à celle de Prometheus puisque l'on garde une configuration de base on saisit seulement l'url : http:///<ip\_de\_la\_machine>:8086\newline
+
+Pour finir la mise en place de Grafana, il faut mettre en place les dashboards pour chacune de nos solutions de monitoring. Pour ça on utilise la fonction qui permet d'importer des dashboards pré-faits avec les panels adéquats, il suffit de lier ces dashboards aux data sources adéquates et nous avons nos dashboards fonctionnels pour monitorer les résultats de Node Exporter, cAdvisor et influxDB.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=1]{images/grafana3.PNG}
+    \caption{Capture d'écran du dashboard des métriques de cAdvisor}
+    \label{fig:mesh1}
+\end{figure}
+
+\subsection{WordPress}
+
+Nous avons mis en place un site Wordpress sous conteneur Docker. Nous utilisons l'image officielle mise en place sur le site Docker Hub.\newline
+
+Nous configurons les paramètres suivants :\newline
+\begin{itemize}
+    \item WORDPRESS\_DB\_HOST: db:3306
+    \item WORDPRESS\_DB\_USER: wordpress
+    \item WORDPRESS\_DB\_PASSWORD: wordpress
+\end{itemize}
+\newline
+
+Pour la base utilisée par le WordPress.
+
+Ensuite, nous en faisons la rapide mise en place graphique.
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.55]{images/wp2.png}
+    \caption{Mise en place du site WordPress}
+    \label{fig:mesh1}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.25]{images/wp5.png}
+    \caption{Mise en place du site WordPress}
+    \label{fig:mesh1}
+\end{figure}
+
+\subsection{MailCow}
+
+En soit MailCow est assez complexe car, comme nous l'avons dit lors de sa présentation, il est constitué de plusieurs conteneurs qui fonctionnent par réseau bridge. Heureusement, la procédure a été plutôt simplifiée pour nous, utilisateurs. Nous avons juste à récupérer le repository officiel de MailCow sur GitHub et dans celui-ci nous retrouverons un script en .sh qui va générer tout ce dont nous avons besoin dans un fichier YAML que nous aurons plus qu'à lancer avec Docker. \newline
+
+Parfois, des ports requis par MailCow sont déjà pris, ce qui entraîne un conflit. On peut vérifier que les ports nécessaires à sa mise en place ne sont pas déjà occupés avec la commande suivante : ss -tlpn | grep -E -w '25|80|110|143|443|465|587|993|995|4190'. Le plus souvent c'est le service exim4 qu'il faudra arrêter et désactiver pour que postfix puisse utiliser le port 25.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=1]{images/mailcow1.png}
+    \caption{Capture de la création des conteneurs MailCow sous Docker}
+    \label{fig:mesh1}
+\end{figure}
+
+Lorsque nous accédons à l'interface web, on se connecte avec les identifiants par défaut (ID : admin, MDP : moohoo). A partir de là, les fonctionnalités de MailCow s'offrent à nous, comme par exemple la création de domaines et de boîtes mail. 
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.8]{images/mailcow2.png}
+    \caption{Capture d'un test d'envoi de mail entre deux boîtes mail}
+    \label{fig:mesh1}
+\end{figure}
+
+\newpage
+
+\subsection{Gatling}
+
+Maintenant que tout est en place, il est grand temps de tester l'infrastructure. Ceci, nous pouvons le faire grâce à Gatling. Dans notre cas, nous avons configuré préalablement Wordpress pour qu'il héberge un site fonctionnel. Sur ce site, nous pouvons y naviguer entre différents pages contenant des ressources média, et poster des commentaires. \newline
+
+Le but de ces tests de charge et de vérifier le bon fonctionnement de l'infrastructure, à la fois sur sa conception, mais aussi sur sa métrologie mise en place. Pendant ces tests, certaines données des métriques changent et sont visibles sur les dashboards de Grafana.\newline
+
+Dans la simulation (mise en annexe 11.7) nous testons d'insérer 3 utilisateurs par seconde au Wordpress en place. Ils vont premièrement récupérer la racine du site, ensuite naviguer vers un article précis, pour finalement ajouter un commentaire en envoyant une requête POST avec de bons paramètres.\newline
+
+Voici le résultat de cette simulation :
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.5]{images/exRenduGatling2.PNG}
+    \caption{Résultat de la simulation sous Gatling}
+    \label{fig:mesh1}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=1]{images/exRenduGatling3.PNG}
+    \caption{Résultat de la simulation sous Gatling}
+    \label{fig:mesh1}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.5]{images/rendu3.png}
+    \caption{Résultat de la simulation sous Grafana}
+    \label{fig:mesh1}
+\end{figure}
+Nous pouvons, sur cette troisième capture, observer l'activité qui change depuis le lancement du test, qui a duré une minute.
+
+\section{Problèmes rencontrés}
+
+\subsection{MailU}
+
+Lors de la mise en place des applications web nous avons décidé de choisir une application web WordPress pour un site internet simple et MailU qui est un serveur de messagerie. Nous avons commencé à faire nos recherches sur MailU, car il propose plusieurs services tel qu'un antispam intégré et est facilement "conteneurisable" grâce à un outil en ligne qui permet de générer un fichier pour déployer simplement le service. Mais c'est ici que notre problème se complique lors du déploiement de MailU sur notre infrastructure nous rencontrons des erreurs liées au fichier que l'outil en ligne a généré.
+\newline
+
+ ERROR: Invalid interpolation format for "image" option in service "admin":\newline "\${DOCKER\_ORG:-mailu}/\${DOCKER\_PREFIX:-}admin:\${MAILU\_VERSION:-1.9}"
+\newline 
+
+Une fois ces erreurs résolues nous rencontrons des erreurs liées à notre réseau.
+Par ici nous parlons plus précisément du serveur DNS, nos différents conteneurs n'arrivent pas à contacter le serveur DNS malgré les modifications que nous avons pu apporter pour résoudre cela, nous avons donc décidé de mettre fin à cette solution au profit de MailCow.
+
+\subsection{Netdata}
+
+Au début du projet on nous a conseillé d'utiliser le duo Netdata et cAdvisor, si nous n'avons eu aucun problème avec cAdvisor nous avons eu en revanche quelques difficultés avec Netdata. En effet quand nous avons découvert la solution, nous avons essayé de l'installer dans sa version la plus récente car elle possédait des fonctionnalités très intéressantes comme le principe de "war room" qui permettait de centraliser les données et les partager au reste d'une équipe tout en y ajoutant un système d'alerting par mail. Mais malheureusement cette version n'était pas compatible avec notre manière d'installer l'application donc nous avions une application Netdata fonctionnelle mais dans une version qui ne nous intéressait pas vraiment, nous avons donc décidé de remplacer Netdata par Node Exporter qui nous permettait d'accomplir nos objectifs plus facilement tout en étant plus léger à l'utilisation que Netdata.
+
+\subsection{InfluxDB}
+
+Avant de vouloir configurer la version 1.8 d'InfluxDB pour notre infrastructure, nous nous sommes d'abord penchés sur sa version la plus récente, c'est-à-dire la 2.1 au moment de ce projet. Seulement, InfluxDB en version 2 n'est plus simplement que des bases de données de séries temporelles, elle est devenue capable de faire tout comme Prometheus. Ceci inclut la récolte des métriques avec les sondes Telegraf.
+\newline
+
+Nous n'utilisons évidemment pas les sondes Telegraf. Nous avons pu observer également que la documentation de InfluxDB changeait de structure entre chacune de ses versions, ce qui rendait son exploitation compliquée. Nous avons dû essentiellement nous référer à des tutoriels pour cette partie-là.
+\newline
+
+En raison des observations faites précédemment, nous avons décidé de continuer avec la version 1.8 \newline
+
+
+\subsection{Infrastructure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[scale=0.5]{images/infra25janv.png}
+    \caption{Infrastructure au 25 janvier 2022}
+    \label{fig:mesh1}
+\end{figure}
+
+Voici l'une des toutes premières formes d'infrastructures que nous avions mise en place. Elle est globalement similaire en termes d'applications comparé à notre infrastructure actuelle. En revanche, on voit ici que chaque machine possède son propre système de monitoring ce qui n'est pas vraiment compatible avec ce qui est attendu comme le fait d'avoir toutes les métriques centralisées en un même point. Cette technique a également l'inconvénient de la taille que prenait un système de monitoring dédoublé et la difficulté d'aller de l'un à l'autre. Nous sommes donc partis ensuite sur l'infrastructure que nous vous avons présentée durant ce rapport, basée sur trois machines, une complètement dédiée au monitoring et les deux autres machines manager et worker, allégées des solutions de métrologie, n'ont que les sondes et les applications propres à leur fonctionnement.  
+
+\chapter{Organisation du projet}
+
+\section{Outils collaboratifs}
+
+La première chose que nous avons mis en place pour notre projet sont les outils pour communiquer et travailler au sein de l'équipe. En effet pour travailler en groupe de quatre, nous avions besoin de nous organiser de manière efficace. Surtout pendant la période de pandémie que nous avons connue. Notre objectif est donc que chaque membre de l'équipe ait accès à toutes les composantes du projet à n'importe quel moment et n'importe où. \newline
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[scale=0.5]{images/ALL.png}
+    \caption{Ensemble des logos d'outils collecticiels et organisationnels utilisés}
+    \label{fig:mesh1}
+\end{figure}
+
+
+\begin{itemize}
+
+    \item Google drive est la suite Google Documents qui nous a permis de mettre en commun toutes nos prises de notes ou ébauches de rapport. Nous utilisons Google Slides pour créer nos diapositives de présentation des soutenances.
+    
+    \item Discord est notre moyen de communication privilégié, toute l'équipe le possédait déjà avant le projet et mettre en place un serveur pour nous permettre d'échanger rapidement des messages ou faire des "réunions" à distance via le vocal ont été très pratiques.
+    
+    \item Trello a été un outil très important de notre organisation, il a permis en effet durant tous le projet de répartir efficacement les tâches et de voir l'avancement de chacune d'entre elles.
+    
+    \item Lucidchart nous a permis de travailler à plusieurs sur des schémas comme celui de notre infrastructure.
+    
+    \item Overleaf est l'outil en ligne qui nous a permis de réaliser notre rapport de soutenance, en effet c'est un outil de rédaction de documents en LaTeX qui est très complet et accessible partout et pour tous. 
+    
+    \item GitLab nous a permis de partager et travailler en parallèle sur les fichiers de configurations des machines et des logiciels.
+    
+\end{itemize}
+
+\section{Répartition des tâches}
+
+Voici un tableau récapitulatif des différentes tâches menées au cours de notre expérimentation que chaque personne a réalisé ou aidé à réaliser :\newline
+
+\begin{center}
+\begin{tabular}{|c|c|c|c|c|}
+  \hline
+  \rowcolor[HTML]{a8dadc} Tâches & Maxence & Sébastien & Evan & Tom \\
+  \hline
+  Cluster Docker & X &  & X & \\
+  \hline
+  Sondes (cAdvisor, Node Exporter) & & & & X \\
+  \hline
+  Prometheus & X & & & X \\
+  \hline
+  Grafana & X & & & X \\
+  \hline
+  InfluxDB & X & X & & \\
+  \hline
+  WordPress & X & & X & \\
+  \hline
+  MailCow & X & & & \\
+  \hline
+  Tests de charge Gatling & & X & & \\
+  \hline
+  Provisionning de l'infrastructure & X & & X & \\
+  \hline
+  Conception de l'architecture & X & X & & X \\
+  \hline
+  Rédaction du rapport sous LaTeX & X & & & X \\
+  \hline
+  Rédaction du rapport & X & X & X & X \\
+  \hline
+  Mise en place des outils organisationnels & X & X & X & X \\
+  \hline
+  
+%-------------------------------------------------------------
+
+  \rowcolor[HTML]{a8dadc} \multicolumn{5}{|c|}{Tâche abandonnées ou pas terminées}\\
+  \hline
+  Netdata & X & & & X \\
+  \hline
+  MailU & & & X & \\
+  \hline
+  Déploiement des services avec Docker Swarm & X & & X & \\
+  \hline
+\end{tabular}
+\end{center}
+
+\chapter{Conclusion}
+
+En conclusion, nous sommes plutôt satisfaits de notre expérience de projet. Celui-ci nous aura permis d'aborder à notre échelle une problématique clé du métier d'administrateur systèmes et réseaux, à savoir anticiper les temps d'interruption et évaluer la robustesse d'une infrastructure en suivant l'évolution d'indicateurs jugés représentatifs. Nous avons pu découvrir une large panoplie de solutions, de la conteneurisation aux logiciels de tests de charge en passant par les outils de métrologie et les applications web. Nous avons dû travailler également sur la composante organisationnelle du projet pour rendre l'avancement de ce-dernier plus efficace. \newline
+
+Nous avons plusieurs poursuites de projet possibles, la suite la plus évidente est l'agrandissement de l'infrastructure avec l'ajout de plus de machines worker, et dans la suite logique plus de services peuvent être mis à disposition, tel qu'AlertManager pour Prometheus qui aurait pu nous aider à gérer les alertes envoyées par les différentes applications afin d'être averti par mail notamment. \newline
+
+Nous aurions pu également affiner les rétentions variables sur InfluxDB, en ne gardant par exemple qu'une minute d'échantillonnage sur les trois premiers mois, puis deux minutes pour l'échantillonnage entre trois et six mois, et enfin ne garder que cinq minutes d'échantillonnage sur les six derniers mois.
+
+\chapter{Bibliographie}
+
+\begin{flushleft}
+
+\url{https://gatling.io/}\newline
+\url{https://gatling.io/open-source/}\newline
+\url{https://www.influxdata.com/}\newline
+\url{https://fr.wikipedia.org/wiki/InfluxDB}\newline
+\url{https://fr.wikipedia.org/wiki/Gatling_(logiciel)}\newline
+\url{https://docs.influxdata.com/}\newline
+\url{https://gatling.io/docs/}\newline
+\url{https://devconnected.com/the-definitive-guide-to-influxdb-in-2019/}\newline
+\url{https://prometheus.io/docs/concepts/metric_types/}\newline
+\url{https://fr.wikipedia.org/wiki/M\%C3\%A9trique_(logiciel)}\newline
+\url{https://www.mayasquad.com/glossaire/endpoint/}\newline
+\url{https://www.youtube.com/watch?v=zMC3SyeaDGU}\newline
+\url{https://github.com/dockersamples/docker-swarm-visualizer}\newline
+\url{https://docs.docker.com/compose/compose-file/#deploy}\newline
+\url{https://www.cerenit.fr/blog/influxdb-shard-duration-retention-policy/}\newline
+\url{https://mailcow.github.io/mailcow-dockerized-docs/#demo}\newline
+\url{https://cicd.life/intro-to-docker-swarm-pt2-config-options-requirements/}\newline
+\url{https://stefanjarina.gitbooks.io/docker/content/swarm-mode/swarm-configs.html}\newline
+\url{https://blog.ruanbekker.com/blog/2019/02/28/use-swarm-managed-configs-in-docker-swarm-to-store-your-application-configs/}\newline
+\url{https://gabrieltanner.org/blog/docker-swarm}\newline
+\url{https://stackoverflow.com/questions/48396459/docker-swarm-build-configuration-in-docker-compose-file-ignored-during-stack}\newline
+\url{https://community.icinga.com/t/retention-policies-and-continuous-queries-made-simple/117}\newline
+\url{https://docs.influxdata.com/influxdb/v1.8/query_language/continuous_queries/}\newline
+\url{https://youtu.be/6ADtXo7uHPg}\newline
+\url{https://docs.influxdata.com/influxdb/v1.8/administration/config/}\newline
+\url{https://www.infoq.com/fr/articles/prometheus-monitor-applications-at-scale/}\newline
+\url{https://www.docker.com/increase-rate-limits?utm_source=docker&utm_medium=web\%20referral&utm_campaign=increase\%20rate\%20limit&utm_budget=}\newline
+\url{https://mailcow.github.io/mailcow-dockerized-docs/post_installation/firststeps-rp/}
+\url{https://mailcow.github.io/mailcow-dockerized-docs/prerequisite/prerequisite-system/#usage-examples}\newline
+%\url{https://mailcow.github.io/mailcow-dockerized-docs/prerequisite/prerequisite-system/#usage-examples}\newline
+\url{https://pkgs.org/search/?q=docker-ce}\newline
+\url{https://www.youtube.com/watch?v=4rzc0hWRSPg}\newline
+\url{https://www.the-digital-life.com/mail-server-on-linux/}\newline
+\url{https://docs.influxdata.com/influxdb/v1.8/query_language/manage-database/#retention-policy-management}\newline
+\url{https://github.com/itzg/docker-minecraft-server#using-docker-compose}\newline
+\url{https://github.com/itzg/docker-minecraft-server/blob/master/examples/docker-compose-paper.yml}\newline
+\url{https://linuxtut.com/fr/c67f198718286b895308/}\newline
+\url{https://www.journaldunet.fr/web-tech/guide-de-l-entreprise-digitale/1443880-prometheus-le-monitoring-oriente-alerting-open-source-gratuit/}\newline
+\url{https://www.linuxtechi.com/install-configure-bind-9-dns-server-ubuntu-debian/}\newline
+\url{https://www.geco-it.fr/2021/12/24/prometheus/}\newline
+\url{https://sematext.com/blog/docker-container-monitoring/}\newline
+\url{https://blog.eleven-labs.com/fr/monitorer-ses-containers-docker/}\newline
+%\url{https://www.geco-it.fr/2021/12/24/prometheus/}\newline
+\url{https://www.youtube.com/watch?v=gb6AiqCJqP0}\newline
+\url{https://chowdera.com/2021/12/202112192124161505.html#22prometheusinfludb_67}\newline
+\url{https://docs.influxdata.com/influxdb/v1.8/guides/downsample_and_retain/}\newline
+\url{https://runebook.dev/fr/docs/influxdata/influxdb/v1.3/guides/downsampling_and_retention/index}\newline
+\url{https://www.youtube.com/watch?v=Vq4cDIdz_M8&list=PLY_rQVYyU1sBO6FFBp18B2wEFsLOE_m8C}\newline
+\url{https://leandeep.com/installer-influxdb-1.8-via-docker/}\newline
+\url{https://www.influxdata.com/blog/prometheus-remote-write-support-with-influxdb-2-0/}\newline
+\url{https://github.com/prometheus/prometheus/issues/5657}\newline
+\url{https://twitter.com/influxdb/status/1416001421124702208}\newline
+\url{https://community.influxdata.com/t/influxdb2-prometheus-endpoint-problem/17380}\newline
+\url{https://community.influxdata.com/t/influxdb2-prometheus-endpoint-problem/17380}\newline
+\url{https://github.com/prometheus/influxdb_exporter}\newline
+\url{https://prometheus.io/docs/instrumenting/exporters/}\newline
+\url{https://grafana.com/grafana/dashboards/13946}\newline
+\url{https://grafana.com/grafana/dashboards/1860}\newline
+\url{https://www.aneo.eu/lorchestration-docker-swarm/}\newline
+\url{https://docs.docker.com/engine/reference/commandline/stack_deploy/}\newline
+\url{https://theogindre.fr/2018/02/16/mise-en-place-dune-stack-de-monitoring-avec-influxdb-grafana-et-telegraf/}\newline
+\url{https://setup.mailu.io/1.9/}\newline
+\url{https://github.com/Mailu/Mailu/issues/853}\newline
+\url{https://l-informaticien-libre.com/installer-serveur-mailu/}\newline
+\url{http://logidee.com/asrall/postfix.pdf}\newline
+\url{http://logidee.com/asrall/postfix.pdf}\newline
+\url{http://x.guimard.free.fr/postfix/}\newline
+\url{https://postfix.traduc.org/index.php/BASIC_CONFIGURATION_README.html}\newline
+\url{https://postfix.traduc.org/index.php/INSTALL.html#install}\newline
+\url{https://hub.docker.com/r/mailu/postfix}\newline
+\url{https://mailu.io/master/compose/setup.html#bind-address}\newline
+\url{https://mailu.io/1.9/}\newline
+\url{https://www.youtube.com/watch?v=o66UFsodUYo&ab_channel=TheDigitalLife}\newline
+\url{https://docs.influxdata.com/influxdb/v1.8/administration/authentication_and_authorization/}\newline
+\url{https://grafana.com/grafana/dashboards/893}\newline
+\url{https://jeckel-lab.fr/2017/12/20/pre-configurer-grafana-avec-docker-compose/}\newline
+\url{https://www.syloe.com/glossaire/docker-swarm/}\newline
+\url{https://prometheus.io/docs/guides/cadvisor/}\newline
+\url{https://learn.netdata.cloud/docs/get-started#run-netdata-with-docker}\newline
+\url{https://wordpress.org/support/article/optimization/}\newline
+\url{https://fr.wordpress.org/support/article/optimization-caching/}\newline
+\url{https://fr.wordpress.org/support/article/how-to-install-wordpress/#instructions-detaillees}\newline
+\url{https://www.techrepublic.com/article/how-to-install-phpmyadmin-on-ubuntu-18-04/}\newline
+\url{https://fr.wordpress.org/support/article/how-to-install-wordpress/}\newline
+\url{https://docs.docker.com/engine/install/debian/}\newline
+\url{https://www.grottedubarbu.fr/introduction-docker-swarm/}\newline
+\url{https://prometheus.io/docs/guides/cadvisor/}\newline
+\url{https://geekflare.com/fr/docker-swarm/}\newline
+\url{https://www.learncloudnative.com/blog/2021-08-25-cadvisor}\newline
+\url{https://www.aukfood.fr/creation-dun-cluster-docker/}\newline
+\url{https://shahbhargav.medium.com/monitoring-docker-containers-using-cadvisor-and-prometheus-5350ae038f45}\newline
+\url{https://hub.docker.com/r/grafana/grafana}\newline
+\url{https://hub.docker.com/r/netdata/netdata}\newline
+\url{https://hub.docker.com/_/wordpress}\newline
+\url{https://hub.docker.com/_/influxdb}\newline
+\url{https://devopssec.fr/article/comprendre-gerer-manipuler-un-cluster-docker-swarm}\newline
+\url{https://www.editions-eni.fr/open/mediabook.aspx?idR=481f99f9659179b81324524f3f5e91b6}\newline
+\url{https://chambreuil.com/public/prof/csi/totalreport.pdf}\newline
+\url{http://www.novagen.tech/deployer-cluster-applicatif-10mn-docker-swarm-_/}\newline
+\url{https://www.it-connect.fr/monitoring-supervision-et-metrologie/}\newline
+\url{https://runebook.dev/fr/docs/influxdata/influxdb/v1.3/guides/downsampling_and_retention/index}\newline
+\newpage
+\url{https://www.davidguida.net/how-to-scale-your-services-with-docker-during-development/}\newline
+\url{https://forums.docker.com/t/autoscaling-in-docker-swarm/44353/10}\newline
+\url{https://www.ionos.fr/digitalguide/serveur/know-how/docker-orchestration-avec-swarm-et-compose/}\newline
+\url{https://www.cloudbees.com/blog/running-services-within-docker-swarm}\newline
+\url{https://docs.docker.com/engine/swarm/how-swarm-mode-works/services/}\newline
+\url{https://docs.docker.com/engine/swarm/}\newline
+\url{https://docs.docker.com/engine/swarm/how-swarm-mode-works/nodes/}\newline
+\url{https://docs.docker.com/engine/swarm/swarm-tutorial/}\newline
+\url{https://www.lebigdata.fr/docker-definition}\newline
+\url{https://docs.docker.com/engine/swarm/stack-deploy/}\newline
+\url{https://docs.docker.com/get-started/swarm-deploy/}\newline
+\url{https://docs.docker.com/compose/compose-file/compose-file-v3/}\newline
+\url{https://docs.docker.com/engine/reference/commandline/service_create/#specify-service-constraints---constraint}\newline
+\url{https://askubuntu.com/questions/1256246/invalid-yaml-mapping-values-are-not-allowed-in-this-context-network}\newline
+\url{https://docs.docker.com/engine/swarm/how-swarm-mode-works/services/}\newline
+\url{https://prometheus.io/docs/alerting/latest/alertmanager/}\newline
+\url{https://www.journaldunet.fr/web-tech/guide-de-l-entreprise-digitale/1146290-docker-definition-docker-compose-docker-hub-docker-swarm-160919/}\newline
+
+\chapter{Annexes}
+\section{Vagrantfile}
+\begin{lstlisting}
+Vagrant.configure("2") do |config|
+
+  # Exécuté sur toutes les VMs
+  config.vm.provision "shell", inline: <<-SHELL
+    # Mise à jour
+    apt-get update
+    #apt-get upgrade
+    # Prérequis
+    apt-get install apt-transport-https
+    apt-get -y install ca-certificates curl gnupg lsb-release
+    # Téléchargement et installation de Docker
+    curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+    echo \
+       "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+    apt-get update
+    apt-get install docker-ce docker-ce-cli containerd.io -y
+    # Téléchargement et installation de docker-compose
+    curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+    chmod +x /usr/local/bin/docker-compose
+  SHELL
+  # Manager
+  config.vm.define "manager" do |b|
+    b.vm.box = "debian/contrib-stretch64"
+    b.vm.hostname = "manager"
+    b.vm.network "private_network", ip: "192.168.56.2"
+    b.vm.provision "shell", path: "provision.sh", args: "manager"
+  end
+  # Worker
+  config.vm.define "worker" do |b|
+    b.vm.box = "debian/contrib-stretch64"
+    b.vm.hostname = "worker"
+    b.vm.network "private_network", ip: "192.168.56.3"
+    b.vm.provision "shell", path: "provision.sh", args: "worker"
+  end
+  # Monitoring
+  config.vm.define "monitoring" do |b|
+    b.vm.box = "debian/contrib-stretch64"
+    b.vm.hostname = "monitoring"
+    b.vm.network "private_network", ip: "192.168.56.4"
+    b.vm.provision "shell", path: "provision.sh", args: "monitoring"
+  end
+end
+\end{lstlisting}
+
+\section{provision.sh}
+\begin{lstlisting}
+#!/bin/bash
+
+VM=$1
+if [ "$VM" = "manager" ];then
+    echo "-------------------------------------------"
+    echo "     Manager (cAdvisor + NodeExporter)     "
+    echo "-------------------------------------------"
+    #Récupération du token pour l'ajout du worker
+    docker swarm init --advertise-addr 192.168.56.2 > /vagrant/token.txt
+    #Mise en place des conteneurs
+    cp /vagrant/manager.local/docker-compose-manager.yml /home/vagrant/
+    cp /vagrant/manager.local/daemon.json /etc/docker/
+    #docker-compose -f docker-compose-manager.yml up -d
+    sudo service docker restart
+    sudo docker run -it -d -p 5000:8080 -v /var/run/docker.sock:/var/run/docker.sock dockersamples/visualizer
+    sudo docker deploy --compose-file docker-compose-manager.yml stackdemo
+fi
+
+if [ "$VM" = "worker" ];then
+    echo "--------------------------------------------------------------"
+    echo "    Worker (Wordpress + MAILU + cAdvisor + NodeExporter)      "
+    echo "--------------------------------------------------------------"
+    #Utilisation du token récupéré
+    sed -n 5p /vagrant/token.txt | while read line ; do echo  $line ; done | sh
+    #Mise en place des conteneurs
+    cp /vagrant/worker.local/docker-compose-worker.yml /home/vagrant/
+    #docker-compose -f docker-compose-worker.yml up -d
+fi
+
+if [ "$VM" = "monitoring" ];then
+    echo "----------------------------------------------------"
+    echo "     Monitoring (Prometheus + InfluxDB + Grafana)   "
+    echo "----------------------------------------------------"
+    #Mise en place des conteneurs et conf Prometheus
+    cp /vagrant/monitoring.local/prometheus.yml /home/vagrant/
+    cp /vagrant/monitoring.local/docker-compose-monitoring.yml /home/vagrant/
+    docker-compose -f docker-compose-monitoring.yml up -d
+fi
+# vim: et sw=4
+
+\end{lstlisting}
+\section{docker-compose-manager.yml}
+\begin{lstlisting}
+version: '3.0'
+services:
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    deploy:
+      mode: global
+    container_name: cadvisor
+    ports:
+    - 8080:8080
+    volumes:
+    - /:/rootfs:ro
+    - /var/run:/var/run:rw
+    - /sys:/sys:ro
+    - /var/lib/docker/:/var/lib/docker:ro
+    depends_on:
+    - redis
+  redis:
+    image: redis:latest
+    deploy:
+      mode: global
+    container_name: redis
+    ports:
+    - 6379:6379
+  node-exporter:
+    image: prom/node-exporter:latest
+    deploy:
+      mode: global
+    ports:
+    - 9100:9100
+  db:
+   image: mysql:5.7
+   deploy:
+     placement:
+       constraints:
+          - "node.role==worker"
+   volumes:
+     - db_data:/var/lib/mysql
+   restart: always
+   environment:
+     MYSQL_ROOT_PASSWORD: somewordpress
+     MYSQL_DATABASE: wordpress
+     MYSQL_USER: wordpress
+     MYSQL_PASSWORD: wordpress
+  wordpress:
+   depends_on:
+     - db
+   image: wordpress:latest
+   deploy:
+     placement:
+       constraints:
+          - "node.role==worker"
+   ports:
+     - "8000:80"
+   restart: always
+   environment:
+     WORDPRESS_DB_HOST: db:3306
+     WORDPRESS_DB_USER: wordpress
+     WORDPRESS_DB_PASSWORD: wordpress
+
+volumes:
+    db_data:
+
+\end{lstlisting}
+
+\section{daemon.json}
+\begin{lstlisting}
+{
+"experimental": true
+}
+\end{lstlisting}
+
+\section{docker-compose-monitoring.yml}
+\begin{lstlisting}
+version: '2.0'
+
+volumes:
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+  # influxdb:
+  influxdb-volume:
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+    - "9090:9090"
+    command:
+    - --config.file=/etc/prometheus/prometheus.yml
+    volumes:
+    - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    - prometheus-data:/prometheus
+  grafana:
+    image: grafana/grafana
+    container_name: grafana
+    ports:
+    - "3000:3000"
+    volumes:
+    - grafana-data:/var/lib/grafana
+  influxdb:
+    image: influxdb:1.8
+    container_name: influxdb
+    restart: always
+    ports:
+      - 8086:8086
+    volumes:
+      - influxdb-volume:/vol01/Docker/monitoring
+    environment:
+      - INFLUXDB_DB=prometheus
+      - INFLUXDB_USER=influx
+      - INFLUXDB_ADMIN_ENABLED=true
+      - INFLUXDB_ADMIN_USER=influxadmin
+      - INFLUXDB_ADMIN_PASSWORD=influxadmin
+\end{lstlisting}
+
+\section{prometheus.yml}
+\begin{lstlisting}
+scrape_configs:
+- job_name: cadvisor_manager
+  scrape_interval: 5s
+  static_configs:
+  - targets: ['192.168.56.2:8080']
+- job_name: node_exporter_manager
+  scrape_interval: 5s
+  static_configs:
+  - targets: ['192.168.56.2:9100']
+- job_name: cadvisor_worker
+  scrape_interval: 5s
+  static_configs:
+  - targets: ['192.168.56.3:8080']
+- job_name: node_exporter_worker
+  scrape_interval: 5s
+  static_configs:
+  - targets: ['192.168.56.3:9100']
+
+remote_write:
+  - url: "http://192.168.56.4:8086/api/v1/prom/write?u=influxadmin&p=influxadmin&db=prometheus"
+
+remote_read:
+  - url: "http://192.168.56.4:8086/api/v1/prom/read?u=influxadmin&p=influxadmin&db=prometheus"
+\end{lstlisting}
+
+\section{SimWordPress.java}
+\begin{lstlisting}
+// required for Gatling core structure DSL
+import io.gatling.javaapi.core.*;
+import static io.gatling.javaapi.core.CoreDsl.*;
+
+// required for Gatling HTTP DSL
+import io.gatling.javaapi.http.*;
+import static io.gatling.javaapi.http.HttpDsl.*;
+
+// can be omitted if you don't use jdbcFeeder
+import io.gatling.javaapi.jdbc.*;
+import static io.gatling.javaapi.jdbc.JdbcDsl.*;
+
+// used for specifying durations with a unit, eg Duration.ofMinutes(5)
+import java.time.Duration;
+
+
+public class SimWordPress extends Simulation {
+
+  HttpProtocolBuilder httpProtocol = http
+   .baseUrl("http://192.168.56.3:8000")
+   .acceptHeader("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9")
+   .doNotTrackHeader("1")
+   .acceptLanguageHeader("fr-FR,fr;q=0.9")
+   .acceptEncodingHeader("gzip, deflate, br")
+   .userAgentHeader("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36");
+
+
+  ScenarioBuilder scn3 = scenario("Stress n°3")
+   .exec(http("request_1")
+     .get("/"))
+   .pause(2)
+   .exec(http("request_2")
+     .get("/2022/03/18/bonjour-tout-le-monde/"))
+   .pause(2)
+   .exec(http("request_3")
+     .post("/wp-comments-post.php")
+     .formParam("comment","Ceci est un commentaire")
+     .formParam("author","BotTestGatling")
+     .formParam("email","jenaipasdemail@rien.com")
+     .formParam("url","google.com")
+     .formParam("comment_post_ID","1")
+     .formParam("comment_parent","0"));
+  {
+    setUp(
+      scn3.injectOpen(constantUsersPerSec(3).during(60))
+    )
+    .protocols(httpProtocol);
+  }
+}
+\end{lstlisting}
+\end{flushleft}
+
+\end{document}
